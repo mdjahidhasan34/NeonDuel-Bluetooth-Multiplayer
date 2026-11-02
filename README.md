@@ -1,31 +1,27 @@
-# NEON DUEL — Offline 1v1 Bluetooth Arena
+# NEON DUEL — Offline Bot and Bluetooth Battle (Android)
 
-Original two-phone Android game with Bluetooth Classic RFCOMM networking.
+A native Android shooting arena game written in Kotlin. This revision adds **PLAY VS BOT (OFFLINE)** so the game can be tested on one phone without Bluetooth, Wi-Fi, mobile data, or a second player.
 
-**Start with `START_HERE_BN.md` for Bangla setup instructions.**
+## Game modes
 
-### Requirements
+- **PLAY VS BOT (OFFLINE)**: choose Rookie, Challenger, or Veteran. Bot moves, shoots, dodges, and chases useful pickups. Joystick / FIRE / DASH controls and first-to-3-rounds matchmaking work as before. Tap PLAY AGAIN after the match.
+- **HOST / JOIN over Bluetooth**: retained from the existing prototype. Connection reliability on two real phones is **not yet verified or repaired** in this update.
 
-- Two Android phones supporting Bluetooth Classic, Android 8.0+ (API 26+)
-- Android Studio, compile SDK 35, Gradle 8.7, Java 17+
-- Internet on the **development computer** the first time Android Studio downloads dependencies (not needed while playing)
+## Build an APK
 
-This source project does not include an APK. The Gradle wrapper JAR is not bundled: on Windows, use `SETUP_WRAPPER_WINDOWS.bat` to fetch and SHA-256 verify the official Gradle 8.7 wrapper JAR. Then open the root folder in Android Studio and build an APK.
+The repository contains `.github/workflows/build-apk.yml`. Push this update to `main`; open GitHub Actions → Build Bluetooth Android APK → the latest successful run → Artifacts → NeonDuel-Bluetooth-Debug-APK. Extract the artifact ZIP to obtain `app-debug.apk`.
 
-### Gameplay
+The Android package id remains `com.jahid.neonduel`. Each GitHub Actions build may use a different ephemeral Android debug signing key. If Android reports that the APK cannot be installed over your old version, uninstall the previous NEON DUEL debug APK first, then install the new one.
 
-Host = cyan (P1). Guest = pink (P2). A round lasts 45 seconds; 5 HP each. Hold FIRE, drag joystick to move, tap DASH to dodge (3.3s cooldown). Shots auto-aim, obstacles block movement and projectiles, green pickups restore up to 2 HP, gold pickups add shields. Damage doubles in the final 10 seconds. If the round timer expires, higher HP wins; a tie awards no point. First to 3 winning rounds takes the match, then either phone can request a new match.
+## Update locally (PowerShell, inside the existing Git repo)
 
-### Connection and privacy
+Download `NeonDuel_Bot_Mode_Update.zip` into Downloads, then run:
 
-App requests only appropriate Android Bluetooth permissions (plus location permission for discovery on Android 11 and below). It does **not** request internet permission and does not upload gameplay data or collect analytics. Nearby devices must consent to pairing. Host socket service ID is constant and shared by both copies of the APK.
+```powershell
+Expand-Archive -Path "$env:USERPROFILE\Downloads\NeonDuel_Bot_Mode_Update.zip" -DestinationPath "." -Force
+git add .
+git commit -m "feat: add offline bot battle mode"
+git push origin main
+```
 
-For network reliability, the host runs authoritative physics on the main thread at approximately 30 ticks/second. The guest transmits input commands at ~30Hz; host transmits world snapshots at ~15Hz. Bluetooth communication uses dedicated reader/writer threads and bounded message queues.
-
-### Project files
-
-`app/src/main/java/com/jahid/neonduel/{MainActivity,BluetoothLink,GameEngine,GameWire,ArenaView}.kt`
-
-### Verification
-
-The standalone `GameEngine.kt` was compiled and tested with local Kotlin/JVM smoke tests. A full Android build and real device-to-device Bluetooth interoperability were **not** tested in this environment because Android SDK and physical handsets are unavailable. Please test on two Android handsets before releasing or publishing.
+Do **not** run `git init` again. This update does not require Bluetooth permissions for bot mode. Kotlin-only engine tests run separately from Android builds and cannot prove the Android application works on a device.

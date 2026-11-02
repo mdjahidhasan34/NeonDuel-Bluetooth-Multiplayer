@@ -36,5 +36,21 @@ fun main() {
     check(battle.players[0].score == 3)
     battle.resetMatch()
     check(battle.phase == "PLAY" && battle.players[0].score == 0)
-    println("GameEngine smoke + rematch tests passed")
+    // Offline bot moves and can fire without needing any Bluetooth connection.
+    val botBattle = GameEngine(Random(102))
+    val opponent = BotOpponent(BotDifficulty.NORMAL, Random(99))
+    val startX = botBattle.players[1].x
+    var botShots = 0
+    repeat(180) {
+        val command = opponent.choose(botBattle, 1f / 30f)
+        if (command.fire) botShots++
+        botBattle.update(1f / 30f, Command(), command)
+    }
+    check(botBattle.players[1].x != startX)
+    check(botShots > 0)
+    check(botBattle.players[1].x in Arena.LEFT..Arena.RIGHT)
+    check(botBattle.players[1].y in Arena.TOP..Arena.BOTTOM)
+    botBattle.resetMatch()
+    check(botBattle.phase == "PLAY" && botBattle.players.all { it.score == 0 })
+    println("GameEngine + offline bot + rematch smoke tests passed")
 }

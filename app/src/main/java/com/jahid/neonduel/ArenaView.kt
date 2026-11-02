@@ -24,7 +24,8 @@ class ArenaView(
     private val game: GameEngine,
     private val mySide: Int,
     private val onLeave: () -> Unit,
-    private val onRematch: () -> Unit
+    private val onRematch: () -> Unit,
+    private val vsBot: Boolean = false
 ) : View(context) {
     companion object {
         private val CYAN = Color.rgb(56, 233, 255)
@@ -191,7 +192,7 @@ class ArenaView(
         c.drawLine(f.x + f.aimX * 9f, f.y + f.aimY * 9f,
             f.x + f.aimX * 31f, f.y + f.aimY * 31f, p)
         c.drawCircle(f.x, f.y, 6f, color(Color.rgb(8, 31, 48)))
-        txt(c, if (i == 0) "P1" else "P2", f.x, f.y - 35f, 11f, shade, true, true)
+        txt(c, if (i == 0) "P1" else if (vsBot) "BOT" else "P2", f.x, f.y - 35f, 11f, shade, true, true)
         // Tiny health meter above character, in addition to the top HUD.
         roundRect(c, f.x - 23f, f.y - 47f, 46f, 4f, 2f, DIM, 120)
         roundRect(c, f.x - 23f, f.y - 47f, 46f * f.hp.coerceIn(0, 5) / 5f, 4f, 2f, shade)
@@ -202,7 +203,7 @@ class ArenaView(
         val a = game.players[0]
         val b = game.players[1]
         txt(c, "CYAN", 34f, 35f, 16f, CYAN, weight = true)
-        txt(c, "PINK", 791f, 35f, 16f, PINK, weight = true) // right-aligned below via bar
+        txt(c, if (vsBot) "BOT" else "PINK", 791f, 35f, 16f, PINK, weight = true) // right-aligned below via bar
         for (i in 0 until 5) {
             roundRect(c, 35f + i * 26f, 46f, 21f, 12f, 4f, if (i < a.hp) CYAN else DIM, if (i < a.hp) 245 else 64)
             roundRect(c, 791f + i * 26f, 46f, 21f, 12f, 4f, if (i < b.hp) PINK else DIM, if (i < b.hp) 245 else 64)
@@ -210,7 +211,7 @@ class ArenaView(
         txt(c, "${a.score}  :  ${b.score}", 480f, 47f, 30f, WHITE, centered = true, weight = true)
         txt(c, "ROUND ${game.round}   •   ${game.seconds.toInt()}s", 480f, 67f, 12f, DIM, centered = true)
         txt(c, "${if (mySide == 0) "YOU" else "RIVAL"}", 191f, 56f, 12f, DIM, weight = true)
-        txt(c, "${if (mySide == 1) "YOU" else "RIVAL"}", 738f, 56f, 12f, DIM, weight = true)
+        txt(c, if (vsBot) "CPU" else if (mySide == 1) "YOU" else "RIVAL", 738f, 56f, 12f, DIM, weight = true)
         roundRect(c, 850f, 17f, 84f, 17f, 8f, Color.rgb(39, 58, 78))
         txt(c, "QUIT ✕", 892f, 29f, 10f, WHITE, centered = true, weight = true)
     }
@@ -232,14 +233,15 @@ class ArenaView(
         ring(c, 669f, 449f, 38f, if (ready) GOLD else DIM, 2.5f)
         txt(c, "DASH", 669f, 454f, 14f, if (ready) WHITE else DIM, true, true)
         if (!ready) txt(c, "${p.dashCooldown.toInt() + 1}s", 669f, 475f, 10f, DIM, true)
-        txt(c, "AUTO-AIM  •  FIRST TO 3 ROUNDS", 482f, 526f, 10f, DIM, true)
+        txt(c, if (vsBot) "SOLO VS BOT  •  FIRST TO 3 ROUNDS" else "AUTO-AIM  •  FIRST TO 3 ROUNDS", 482f, 526f, 10f, DIM, true)
     }
 
     private fun drawOverlays(c: Canvas) {
         if (game.phase == "PLAY") return
         roundRect(c, 260f, 166f, 440f, 191f, 24f, BG, 236)
         ring(c, 480f, 250f, 104f, if (game.winner == 1) CYAN else if (game.winner == 2) PINK else GOLD, 2f, 80)
-        txt(c, game.message, 480f, 240f, 25f, WHITE, centered = true, weight = true)
+        val headline = if (vsBot) game.message.replace("CYAN", "YOU").replace("PINK", "BOT") else game.message
+        txt(c, headline, 480f, 240f, 25f, WHITE, centered = true, weight = true)
         if (game.phase == "ROUND_OVER") {
             txt(c, "NEXT ROUND STARTING...", 480f, 281f, 14f, DIM, centered = true)
         } else {

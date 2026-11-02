@@ -37,6 +37,7 @@ class MainActivity : Activity() {
         private const val HOST = 1
         private const val GUEST = 2
         private const val IDLE = 0
+        private const val BOT = 3
         private val CYAN = Color.rgb(56, 233, 255)
         private val PINK = Color.rgb(255, 80, 164)
         private val WHITE = Color.rgb(233, 243, 255)
@@ -49,8 +50,10 @@ class MainActivity : Activity() {
     private lateinit var link: BluetoothLink
     private var mode = IDLE
     private var pendingAction: (() -> Unit)? = null
-    private var lastStatus = "Connect two Android phones to play offline."
+    private var lastStatus = "Play against a bot now, or connect two phones over Bluetooth."
     private var game: GameEngine? = null
+    private var botOpponent: BotOpponent? = null
+    private var botLevel = BotDifficulty.NORMAL
     private var arena: ArenaView? = null
     private var remoteInput = Command()
     private var scanning = false
@@ -81,17 +84,19 @@ class MainActivity : Activity() {
 
     private val runner = object : Runnable {
         override fun run() {
-            if (mode == IDLE || !link.isConnected()) return
+            if (mode == IDLE || (mode != BOT && !link.isConnected())) return
             val g = game ?: return
             val view = arena ?: return
             val now = SystemClock.uptimeMillis()
             val dt = ((now - lastTick) / 1000f).coerceIn(0f, .05f)
             lastTick = now
-            if (mode == HOST) {
-                g.update(dt, view.takeCommand(), remoteInput)
-                if (++frames % 2 == 0) link.send(GameWire.state(g))
-            } else {
-                link.send(GameWire.input(view.takeCommand()))
+            when (mode) {
+                HOST -> {
+                    g.update(dt, view.takeCommand(), remoteInput)
+                    if (++frames % 2 == 0) link.send(GameWire.state(g))
+                }
+                GUEST -> link.send(GameWire.input(view.takeCommand()))
+                BOT -> g.update(dt, view.takeCommand(), botOpponent?.choose(g, dt) ?: Command())
             }
             view.invalidate()
             loop.postDelayed(this, 33L)
@@ -104,14 +109,15 @@ class MainActivity : Activity() {
             View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
             View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN)
         link = BluetoothLink(
-            onConnected = { peer -> launchArena(peer) },
+            onConnected = { peer -> if (mode == HOST || mode == GUEST) launchArena(peer) },
             onLine = { line -> receive(line) },
             onEnd = { reason ->
-                if (mode != IDLE) {
+                if (mode == HOST || mode == GUEST) {
                     mode = IDLE
                     loop.removeCallbacks(runner)
                     game = null
                     arena = null
+                    botOpponent = null
                     showMenu("Disconnected: $reason")
                 }
             }
@@ -171,8 +177,8 @@ class MainActivity : Activity() {
         wrap.addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         left.addView(label("⚡  NEON", 39f, CYAN, true))
         left.addView(label("DUEL", 43f, WHITE, true))
-        left.addView(label("BLUETOOTH BATTLE ARENA", 13f, PINK, true))
-        val summary = label("Move • Auto-aim • Shoot • Dash\nGrab power-ups. Win 3 rounds.\nNo Wi-Fi. No mobile data. Just two phones.", 14f, MUTED)
+        left.addView(label("OFFLINE BOT + BLUETOOTH BATTLE", 13f, PINK, true))
+        val summary = label("Move • Auto-aim • Shoot • Dash\nGrab power-ups. Win 3 rounds.\nBattle a bot, or play with two phones.\nNo Wi-Fi or mobile data needed.", 14f, MUTED)
         summary.setPadding(0, dp(18), dp(14), 0)
         left.addView(summary)
 
@@ -183,16 +189,17 @@ class MainActivity : Activity() {
         }
         wrap.addView(right, LinearLayout.LayoutParams(dp(343), ViewGroup.LayoutParams.WRAP_CONTENT))
         right.addView(label("READY TO BATTLE?", 18f, WHITE, true))
-        right.addView(label("One player hosts. The other joins.", 12f, MUTED).also {
+        right.addView(label("Start solo, or invite another phone.", 12f, MUTED).also {
             it.setPadding(0, dp(3), 0, dp(10))
         })
-        val host = button("HOST A MATCH  (PLAYER 1)", NAVY, CYAN) { beginHost() }
+        val botButton = button("PLAY VS BOT  (OFFLINE)", NAVY, CYAN) { selectBotDifficulty() }
+        val host = button("HOST A MATCH  (PLAYER 1)", WHITE, Color.rgb(29, 82, 96)) { beginHost() }
         val join = button("JOIN A MATCH  (PLAYER 2)", WHITE, Color.rgb(42, 42, 83)) { beginJoin() }
         val scan = button("SCAN NEARBY PHONES", WHITE, Color.rgb(27, 47, 69)) { beginScan() }
         val guide = button("HOW TO PLAY", PINK, Color.rgb(35, 30, 52)) { help() }
         val actions = if (mode != IDLE) listOf(
             button("CANCEL CONNECTION / HOST", WHITE, Color.rgb(74, 34, 57)) { leave() }, guide
-        ) else listOf(host, join, scan, guide)
+        ) else listOf(botButton, host, join, scan, guide)
         for (b in actions) {
             right.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(51)).apply {
                 bottomMargin = dp(8)
@@ -208,17 +215,38 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("NEON DUEL — HOW TO PLAY")
             .setMessage(
-                "1. Install the same game on TWO Android phones.\n\n" +
-                "2. Turn on Bluetooth on both phones. Player 1 taps HOST. Player 2 taps JOIN and chooses the host. " +
+                "SOLO: Tap PLAY VS BOT and choose a difficulty. No Bluetooth or internet is needed.\n\n" +
+                "BLUETOOTH: Install the same game on TWO Android phones. Turn on Bluetooth on both. " +
+                "Player 1 taps HOST. Player 2 taps JOIN and chooses the host. " +
                 "You can also pair the phones in Android Bluetooth Settings first.\n\n" +
-                "3. Drag the LEFT joystick to move. Hold FIRE to shoot at your opponent automatically. " +
+                "CONTROLS: Drag the LEFT joystick to move. Hold FIRE to shoot at your opponent automatically. " +
                 "Tap DASH to dodge (short cooldown).\n\n" +
-                "4. Green pickup heals; gold pickup adds a shield. " +
+                "PICKUPS: Green heals; gold adds a shield. " +
                 "The last 10 seconds of a round have DOUBLE damage.\n\n" +
-                "5. Reduce the opponent's HP to 0, or have more HP when time expires. " +
+                "WINNING: Reduce the opponent's HP to 0, or have more HP when time expires. " +
                 "First to win THREE rounds wins the match.\n\n" +
-                "Play offline, nearby, without internet. Both phones must keep the app open."
+                "Offline bot mode works on one phone. For Bluetooth, both phones must keep the app open."
             ).setPositiveButton("LET'S PLAY", null).show()
+    }
+
+    private fun selectBotDifficulty() {
+        val levels = BotDifficulty.values()
+        AlertDialog.Builder(this)
+            .setTitle("PLAY VS BOT — DIFFICULTY")
+            .setItems(levels.map { it.title }.toTypedArray()) { _, selected ->
+                beginBot(levels[selected])
+            }
+            .setNegativeButton("CANCEL", null)
+            .show()
+    }
+
+    private fun beginBot(level: BotDifficulty) {
+        clearDiscovery()
+        link.stop()
+        mode = BOT
+        botLevel = level
+        botOpponent = BotOpponent(level)
+        launchArena("${level.title} bot")
     }
 
     @SuppressLint("MissingPermission")
@@ -372,8 +400,8 @@ class MainActivity : Activity() {
         val instance = GameEngine()
         game = instance
         remoteInput = Command()
-        val v = ArenaView(this, instance, if (mode == HOST) 0 else 1,
-            onLeave = { leave() }, onRematch = { rematch() })
+        val v = ArenaView(this, instance, if (mode == GUEST) 1 else 0,
+            onLeave = { leave() }, onRematch = { rematch() }, vsBot = mode == BOT)
         arena = v
         setContentView(v)
         lastTick = SystemClock.uptimeMillis()
@@ -405,8 +433,10 @@ class MainActivity : Activity() {
     private fun rematch() {
         val g = game ?: return
         if (g.phase != "MATCH_OVER") return
-        if (mode == HOST) g.resetMatch()
-        else if (mode == GUEST) link.send("{\"t\":\"again\"}")
+        if (mode == HOST || mode == BOT) {
+            g.resetMatch()
+            if (mode == BOT) botOpponent = BotOpponent(botLevel)
+        } else if (mode == GUEST) link.send("{\"t\":\"again\"}")
     }
 
     private fun leave() {
@@ -416,7 +446,8 @@ class MainActivity : Activity() {
         link.stop()
         game = null
         arena = null
-        showMenu("Match closed. Host or join to play again.")
+        botOpponent = null
+        showMenu("Match closed. Play vs bot or connect two phones.")
     }
 
     @Deprecated("Android back")
