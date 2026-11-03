@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "NeonDuelBluetooth"
+rootProject.name = "FriendsZone"
 include(":app")

@@ -22,13 +22,18 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ImageView
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.EditText
+import android.widget.Toast
+import android.net.wifi.WifiManager
+import java.net.NetworkInterface
 import android.widget.ScrollView
 import android.widget.TextView
 import org.json.JSONObject
 
-/** Two phones, Bluetooth Classic only. No server, account, location tracking, or internet. */
+/** Offline bot, legacy Bluetooth and local hotspot matches without internet. */
 class MainActivity : Activity() {
     companion object {
         private const val REQUEST_PERMISSIONS = 1001
@@ -38,6 +43,8 @@ class MainActivity : Activity() {
         private const val GUEST = 2
         private const val IDLE = 0
         private const val BOT = 3
+        private const val WIFI_HOST = 4
+        private const val WIFI_GUEST = 5
         private val CYAN = Color.rgb(56, 233, 255)
         private val PINK = Color.rgb(255, 80, 164)
         private val WHITE = Color.rgb(233, 243, 255)
@@ -50,7 +57,7 @@ class MainActivity : Activity() {
     private lateinit var link: BluetoothLink
     private var mode = IDLE
     private var pendingAction: (() -> Unit)? = null
-    private var lastStatus = "Play against a bot now, or connect two phones over Bluetooth."
+    private var lastStatus = "Play offline or host a local Wi-Fi battle for 2–10 players."
     private var game: GameEngine? = null
     private var botOpponent: BotOpponent? = null
     private var botLevel = BotDifficulty.NORMAL
@@ -61,6 +68,38 @@ class MainActivity : Activity() {
     private val foundDevices = linkedMapOf<String, BluetoothDevice>()
     private var lastTick = 0L
     private var frames = 0
+    private var wifiHost: HotspotHost? = null
+    private var wifiGuest: HotspotGuest? = null
+    private var wifiRule = RoomMode.FREE_FOR_ALL
+    private var wifiLight = LightMode.DAY
+    private var wifiMembers: List<Int> = listOf(0)
+    private var wifiPlayerId = 0
+    private var wifiGame: OnlineGame? = null
+    private var wifiArena: HotspotArenaView? = null
+    private val wifiInputs = mutableMapOf<Int, Command>()
+    private var wifiFrames = 0
+    private var wifiLastTick = 0L
+    private val wifiRunner = object : Runnable {
+        override fun run() {
+            if (mode != WIFI_HOST && mode != WIFI_GUEST) return
+            val g = wifiGame ?: return
+            val v = wifiArena ?: return
+            val now = SystemClock.uptimeMillis()
+            val dt = ((now - wifiLastTick) / 1000f).coerceIn(0f, .05f)
+            wifiLastTick = now
+            if (mode == WIFI_HOST) {
+                wifiInputs[0] = v.takeCommand()
+                g.update(dt, wifiInputs)
+                wifiInputs.values.forEach { it.dash = false }
+                if (++wifiFrames % 3 == 0 || !g.running) wifiHost?.broadcast(OnlinePackets.state(g))
+            } else {
+                val next = v.takeCommand()
+                if (++wifiFrames % 2 == 0 || next.dash) wifiGuest?.send(OnlinePackets.input(next))
+            }
+            v.invalidate()
+            loop.postDelayed(this, 33L)
+        }
+    }
 
     private val receiver = object : BroadcastReceiver() {
         @SuppressLint("MissingPermission")
@@ -175,10 +214,21 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         wrap.addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        left.addView(label("⚡  NEON", 39f, CYAN, true))
-        left.addView(label("DUEL", 43f, WHITE, true))
-        left.addView(label("OFFLINE BOT + BLUETOOTH BATTLE", 13f, PINK, true))
-        val summary = label("Move • Auto-aim • Shoot • Dash\nGrab power-ups. Win 3 rounds.\nBattle a bot, or play with two phones.\nNo Wi-Fi or mobile data needed.", 14f, MUTED)
+        left.addView(label("FRIENDS", 37f, CYAN, true))
+        left.addView(label("ZONE", 42f, WHITE, true))
+        val cover = ImageView(this).apply {
+            setImageResource(com.jahid.neonduel.R.drawable.friends_zone_banner)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            contentDescription = "Friends Zone game poster"
+        }
+        left.addView(cover, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(175)).apply {
+            topMargin = dp(7)
+            rightMargin = dp(24)
+            bottomMargin = dp(4)
+        })
+        left.addView(label("OFFLINE BOT + HOTSPOT 10 PLAYER BATTLE", 13f, PINK, true))
+        val summary = label("Move • Auto-aim • Shoot • Dash\nFFA: 2–10 players. DUO TEAMS: max 2 per team.\nHost also plays. Use one phone hotspot.\nNo mobile data / internet required.", 14f, MUTED)
         summary.setPadding(0, dp(18), dp(14), 0)
         left.addView(summary)
 
@@ -189,17 +239,26 @@ class MainActivity : Activity() {
         }
         wrap.addView(right, LinearLayout.LayoutParams(dp(343), ViewGroup.LayoutParams.WRAP_CONTENT))
         right.addView(label("READY TO BATTLE?", 18f, WHITE, true))
-        right.addView(label("Start solo, or invite another phone.", 12f, MUTED).also {
+        right.addView(label("Play solo or host a Wi-Fi room.", 12f, MUTED).also {
             it.setPadding(0, dp(3), 0, dp(10))
         })
         val botButton = button("PLAY VS BOT  (OFFLINE)", NAVY, CYAN) { selectBotDifficulty() }
-        val host = button("HOST A MATCH  (PLAYER 1)", WHITE, Color.rgb(29, 82, 96)) { beginHost() }
-        val join = button("JOIN A MATCH  (PLAYER 2)", WHITE, Color.rgb(42, 42, 83)) { beginJoin() }
+        val wifiFfa = button("HOST WI-FI — FREE FOR ALL (2–10)", NAVY, Color.rgb(131, 216, 172)) {
+            beginWifiHost(RoomMode.FREE_FOR_ALL)
+        }
+        val wifiDuos = button("HOST WI-FI — DUO TEAMS (2/TEAM)", WHITE, Color.rgb(40, 95, 110)) {
+            beginWifiHost(RoomMode.DUO_TEAMS)
+        }
+        val wifiJoin = button("JOIN WI-FI / HOTSPOT MATCH", WHITE, Color.rgb(60, 67, 126)) {
+            beginWifiJoin()
+        }
+        val host = button("BLUETOOTH HOST (LEGACY)", WHITE, Color.rgb(29, 82, 96)) { beginHost() }
+        val join = button("BLUETOOTH JOIN (LEGACY)", WHITE, Color.rgb(42, 42, 83)) { beginJoin() }
         val scan = button("SCAN NEARBY PHONES", WHITE, Color.rgb(27, 47, 69)) { beginScan() }
         val guide = button("HOW TO PLAY", PINK, Color.rgb(35, 30, 52)) { help() }
         val actions = if (mode != IDLE) listOf(
             button("CANCEL CONNECTION / HOST", WHITE, Color.rgb(74, 34, 57)) { leave() }, guide
-        ) else listOf(botButton, host, join, scan, guide)
+        ) else listOf(botButton, wifiFfa, wifiDuos, wifiJoin, host, join, scan, guide)
         for (b in actions) {
             right.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(51)).apply {
                 bottomMargin = dp(8)
@@ -213,8 +272,13 @@ class MainActivity : Activity() {
 
     private fun help() {
         AlertDialog.Builder(this)
-            .setTitle("NEON DUEL — HOW TO PLAY")
+            .setTitle("FRIENDS ZONE — HOW TO PLAY")
             .setMessage(
+                "WI-FI HOTSPOT: One phone turns on hotspot, then taps HOST WI-FI and chooses Free For All " +
+                "or Duo Teams. Other phones connect to the hotspot in Android Settings, then tap JOIN WI-FI. " +
+                "Enter the host phone's hotspot IP if auto-detection does not work. The host also plays. " +
+                "FFA supports 2 to 10 players. Duo Teams has at most 2 members per team (4, 6, 8, or 10 total). " +
+                "Host presses START MATCH once everyone joins. No internet is needed.\n\n" +
                 "SOLO: Tap PLAY VS BOT and choose a difficulty. No Bluetooth or internet is needed.\n\n" +
                 "BLUETOOTH: Install the same game on TWO Android phones. Turn on Bluetooth on both. " +
                 "Player 1 taps HOST. Player 2 taps JOIN and chooses the host. " +
@@ -430,6 +494,241 @@ class MainActivity : Activity() {
         } catch (_: Exception) { /* malformed peer message is ignored */ }
     }
 
+    // The host owns all simulation and accepts up to nine remote phones.
+    private fun beginWifiHost(rule: RoomMode) {
+        clearDiscovery()
+        link.stop()
+        mode = WIFI_HOST
+        wifiRule = rule
+        wifiLight = LightMode.DAY
+        wifiPlayerId = 0
+        wifiMembers = listOf(0)
+        wifiInputs.clear()
+        wifiGame = null
+        wifiArena = null
+        wifiHost?.stop()
+        wifiGuest?.stop()
+        wifiGuest = null
+        wifiHost = HotspotHost(
+            onJoined = { id -> loop.post {
+                if (mode == WIFI_HOST && wifiGame == null) {
+                    wifiMembers = wifiHost?.ids() ?: listOf(0)
+                    wifiHost?.broadcast(OnlinePackets.lobby(wifiRule, wifiMembers, wifiLight))
+                    showWifiLobby("Player ${id + 1} joined")
+                }
+            } },
+            onLine = { id, line -> loop.post {
+                if (mode == WIFI_HOST) receiveWifiCommand(id, line)
+            } },
+            onLeft = { id -> loop.post {
+                if (mode == WIFI_HOST) {
+                    wifiInputs.remove(id)
+                    wifiGame?.disconnect(id)
+                    if (wifiGame == null) {
+                        wifiMembers = wifiHost?.ids() ?: listOf(0)
+                        wifiHost?.broadcast(OnlinePackets.lobby(wifiRule, wifiMembers, wifiLight))
+                        showWifiLobby("Player ${id + 1} disconnected")
+                    }
+                }
+            } },
+            onFailure = { error -> loop.post {
+                if (mode == WIFI_HOST) { leave(); showMenu("Hotspot server failed: $error") }
+            } }
+        )
+        wifiHost?.start()
+        showWifiLobby("Enable your phone's hotspot first. Guests join the hotspot network, then use JOIN WI-FI.")
+    }
+
+    @Suppress("DEPRECATION")
+    private fun hotspotGateway(): String {
+        return try {
+            val manager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val address = manager.dhcpInfo?.gateway ?: 0
+            if (address == 0) "192.168.43.1" else (0..3).joinToString(".") { i ->
+                ((address shr (8 * i)) and 255).toString()
+            }
+        } catch (_: Exception) { "192.168.43.1" }
+    }
+
+    private fun hostAddressHints(): String {
+        return try {
+            val addresses = mutableListOf<String>()
+            val networks = NetworkInterface.getNetworkInterfaces()
+            while (networks != null && networks.hasMoreElements()) {
+                val iface = networks.nextElement()
+                if (!iface.isUp || iface.isLoopback) continue
+                val values = iface.inetAddresses
+                while (values.hasMoreElements()) {
+                    val addr = values.nextElement()
+                    if (addr is java.net.Inet4Address && addr.isSiteLocalAddress) {
+                        addresses += addr.hostAddress ?: continue
+                    }
+                }
+            }
+            addresses.distinct().joinToString(", ").ifEmpty { "Check hotspot IP in phone network details" }
+        } catch (_: Exception) { "Check hotspot IP in phone network details" }
+    }
+
+    private fun beginWifiJoin() {
+        val field = EditText(this).apply {
+            setSingleLine(true)
+            setText(hotspotGateway())
+            hint = "Host IP (e.g. 192.168.43.1)"
+            setSelectAllOnFocus(true)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("JOIN HOTSPOT GAME")
+            .setMessage("Connect your phone to the host's Wi-Fi hotspot in Android Settings first. The host must create a room. Enter the hotspot gateway IP below.")
+            .setView(field)
+            .setPositiveButton("CONNECT") { _, _ ->
+                val ip = field.text.toString().trim()
+                if (!ip.matches(Regex("[0-9.]{7,15}"))) {
+                    Toast.makeText(this, "Enter a valid IPv4 address", Toast.LENGTH_LONG).show()
+                } else connectWifiGuest(ip)
+            }
+            .setNegativeButton("CANCEL", null).show()
+    }
+
+    private fun connectWifiGuest(ip: String) {
+        clearDiscovery(); link.stop()
+        wifiHost?.stop(); wifiHost = null
+        wifiGuest?.stop()
+        wifiPlayerId = -1
+        wifiMembers = emptyList()
+        wifiGame = null
+        wifiArena = null
+        mode = WIFI_GUEST
+        wifiGuest = HotspotGuest(
+            onLine = { line -> loop.post { if (mode == WIFI_GUEST) receiveWifiPacket(line) } },
+            onClosed = { error -> loop.post {
+                if (mode == WIFI_GUEST) { leave(); showMenu("Hotspot disconnected: $error. Check host IP and hotspot connection.") }
+            } }
+        )
+        showWifiLobby("Connecting to $ip ...")
+        wifiGuest?.connect(ip)
+    }
+
+    private fun showWifiLobby(status: String) {
+        if (mode != WIFI_HOST && mode != WIFI_GUEST) return
+        val isHost = mode == WIFI_HOST
+        val scroll = ScrollView(this).apply { setBackgroundColor(NAVY) }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(25), dp(16), dp(25), dp(18))
+        }
+        scroll.addView(content)
+        content.addView(label("FRIENDS ZONE — WI-FI ROOM", 28f, CYAN, true))
+        content.addView(label(if (wifiRule == RoomMode.FREE_FOR_ALL) "FREE FOR ALL • 2–10 PLAYERS"
+            else "DUO TEAMS • 2 PLAYERS PER TEAM", 17f, PINK, true))
+        content.addView(label(if (isHost) "Host hotspot IP: ${hostAddressHints()}"
+            else "You are Player ${if (wifiPlayerId < 0) "?" else wifiPlayerId + 1}", 14f, WHITE))
+        content.addView(label(status, 13f, MUTED))
+        val playersLine = if (wifiMembers.isEmpty()) "Connecting..." else wifiMembers.mapIndexed { i, id ->
+            "P${id + 1}" + if (wifiRule == RoomMode.DUO_TEAMS) " (Team ${i / 2 + 1})" else ""
+        }.joinToString("    ")
+        content.addView(label("PLAYERS (${wifiMembers.size}/10):  $playersLine", 15f, WHITE))
+        content.addView(label("For hotspot: host and guests must share the same hotspot Wi-Fi. Host is also a player.", 12f, MUTED))
+        if (isHost) {
+            val count = wifiMembers.size
+            val allowed = count >= 2 && (wifiRule == RoomMode.FREE_FOR_ALL || (count >= 4 && count % 2 == 0))
+            content.addView(button("START MATCH", if (allowed) NAVY else MUTED,
+                if (allowed) CYAN else Color.rgb(48, 59, 76)) {
+                if (allowed) startWifiMatch()
+                else Toast.makeText(this, "FFA needs 2–10. Duo Teams needs an even number, 4–10.", Toast.LENGTH_LONG).show()
+            })
+            content.addView(button("SCENERY: ${wifiLight.name} (TAP TO CHANGE)", WHITE, Color.rgb(53, 72, 61)) {
+                val options = LightMode.values()
+                wifiLight = options[(options.indexOf(wifiLight) + 1) % options.size]
+                wifiHost?.broadcast(OnlinePackets.lobby(wifiRule, wifiMembers, wifiLight))
+                showWifiLobby("Scenery changed to ${wifiLight.name}")
+            })
+            content.addView(button("OPEN WI-FI / HOTSPOT SETTINGS", WHITE, Color.rgb(44, 64, 88)) {
+                startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS))
+            })
+        }
+        content.addView(button("LEAVE ROOM", WHITE, Color.rgb(90, 35, 62)) { leave() })
+        setContentView(scroll)
+    }
+
+    private fun startWifiMatch() {
+        if (mode != WIFI_HOST) return
+        val ids = wifiHost?.ids() ?: return
+        if (ids.size !in 2..10 || (wifiRule == RoomMode.DUO_TEAMS && (ids.size < 4 || ids.size % 2 != 0))) {
+            showWifiLobby("Waiting for more players. Team mode requires 4, 6, 8 or 10 players.")
+            return
+        }
+        wifiMembers = ids
+        wifiHost?.lock()
+        wifiGame = OnlineGame(wifiRule, ids, wifiLight)
+        wifiInputs.clear()
+        wifiHost?.broadcast(OnlinePackets.start(wifiRule, ids, wifiLight))
+        launchWifiScreen()
+        wifiHost?.broadcast(OnlinePackets.state(wifiGame!!))
+    }
+
+    private fun launchWifiScreen() {
+        val g = wifiGame ?: return
+        wifiArena = HotspotArenaView(this, { wifiGame?.state() }, { wifiGame?.rocks ?: emptyList() },
+            { wifiPlayerId }, { leave() }, { wifiRematch() })
+        setContentView(wifiArena)
+        wifiLastTick = SystemClock.uptimeMillis()
+        wifiFrames = 0
+        loop.removeCallbacks(wifiRunner)
+        loop.post(wifiRunner)
+    }
+
+    private fun receiveWifiCommand(id: Int, line: String) {
+        try {
+            val j = JSONObject(line)
+            if (j.optString("t") == "cmd" && wifiGame != null) {
+                val c = OnlinePackets.decodeInput(j)
+                c.dash = c.dash || (wifiInputs[id]?.dash == true)
+                wifiInputs[id] = c
+            }
+        } catch (_: Exception) { }
+    }
+
+    private fun receiveWifiPacket(line: String) {
+        try {
+            val j = JSONObject(line)
+            when (j.optString("t")) {
+                "welcome" -> { wifiPlayerId = j.getInt("id"); showWifiLobby("Connected to host. Waiting for others...") }
+                "reject" -> { val reason = j.optString("message", "Room unavailable"); leave(); showMenu(reason) }
+                "lobby" -> {
+                    wifiRule = RoomMode.valueOf(j.getString("mode"))
+                    wifiLight = LightMode.valueOf(j.optString("light", "DAY"))
+                    wifiMembers = OnlinePackets.memberIds(j)
+                    if (wifiGame == null) showWifiLobby("Waiting for host to start match...")
+                }
+                "start" -> {
+                    wifiRule = RoomMode.valueOf(j.getString("mode"))
+                    wifiLight = LightMode.valueOf(j.optString("light", "DAY"))
+                    wifiMembers = OnlinePackets.memberIds(j)
+                    wifiGame = OnlineGame(wifiRule, wifiMembers, wifiLight)
+                    launchWifiScreen()
+                }
+                "world" -> {
+                    val state = OnlinePackets.decodeState(j) ?: return
+                    wifiGame?.load(state)
+                    wifiArena?.invalidate()
+                }
+            }
+        } catch (_: Exception) { }
+    }
+
+    private fun wifiRematch() {
+        if (mode != WIFI_HOST) {
+            Toast.makeText(this, "Only the host can start a rematch", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (wifiGame?.running != false) return
+        // Use currently connected peers so a disconnected phone never blocks rematches.
+        wifiHost?.unlock()
+        wifiGame = null
+        startWifiMatch()
+    }
+
     private fun rematch() {
         val g = game ?: return
         if (g.phase != "MATCH_OVER") return
@@ -442,12 +741,17 @@ class MainActivity : Activity() {
     private fun leave() {
         mode = IDLE
         loop.removeCallbacks(runner)
+        loop.removeCallbacks(wifiRunner)
+        wifiHost?.stop(); wifiHost = null
+        wifiGuest?.stop(); wifiGuest = null
+        wifiGame = null; wifiArena = null
+        wifiInputs.clear()
         clearDiscovery()
         link.stop()
         game = null
         arena = null
         botOpponent = null
-        showMenu("Match closed. Play vs bot or connect two phones.")
+        showMenu("Match closed. Host a Wi-Fi battle, or play vs bot.")
     }
 
     @Deprecated("Android back")
@@ -459,6 +763,9 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         mode = IDLE
         loop.removeCallbacks(runner)
+        loop.removeCallbacks(wifiRunner)
+        wifiHost?.stop()
+        wifiGuest?.stop()
         clearDiscovery()
         link.stop()
         super.onDestroy()
